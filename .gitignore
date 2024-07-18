@@ -29,3 +29,6 @@ coverage.txt
 # Exclude IDE folders
 .idea/*
 .vscode/*
+.DS_Store
+.testdata/tmp/
+__debug_bin*

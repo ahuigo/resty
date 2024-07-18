@@ -126,9 +126,11 @@ import "github.com/go-resty/resty/v2"
 
 ```go
 // Create a Resty Client
+var curlCmdExecuted string
 client := resty.New()
 
 resp, err := client.R().
+    SetResultCurlCmd(&curlCmdExecuted).
     EnableTrace().
     Get("https://httpbin.org/get")
 curlCmdExecuted := resp.Request.GenerateCurlCommand()
@@ -136,6 +138,9 @@ curlCmdExecuted := resp.Request.GenerateCurlCommand()
 
 // Explore curl command
 fmt.Println("Curl Command:\n  ", curlCmdExecuted+"\n")
+
+// Explore curl command
+fmt.Println("Curl Command:", curlCmdExecuted)
 
 // Explore response object
 fmt.Println("Response Info:")

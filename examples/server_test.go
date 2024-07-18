@@ -2,22 +2,80 @@ package examples
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	ioutil "io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const maxMultipartMemory = 4 << 30 // 4MB
+
+/*
+// tlsCert:
+//
+//	0 no certificate
+//	1 with self-signed certificate
+//	2 with custom certificate from CA
+
+	func createHttpbinServerOld(tlsCert int) (ts *httptest.Server) {
+		ts = createTestServer(func(w http.ResponseWriter, r *http.Request) {
+			const pathPattern = "^/(get|post|put|patch|delete)$"
+			isMethodPath, _:= regexp.MatchString(pathPattern, r.URL.Path)
+			switch path := r.URL.Path; {
+			case isMethodPath:
+				httpbinHandler(w, r)
+			case strings.HasPrefix(path, "/sleep/"): //sleep/3
+				sleepHandler(w, r)
+			case path == "/cookie/count":
+				cookieHandler(w, r)
+			defaultv:
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte("404 " + path))
+			}
+		}, tlsCert)
+
+		return ts
+	}
+
+	func createEchoServer() (ts *httptest.Server) {
+		ts = createTestServer(func(w http.ResponseWriter, r *http.Request) {
+			res := dumpRequest(r)
+			_, _ = w.Write([]byte(res))
+		}, 0)
+		return ts
+	}
+
+	func dumpRequest(request *http.Request) string {
+		var r strings.Builder
+		// dump header
+		res := request.Method + " " + //request.URL.String() +" "+
+			request.Host +
+			request.URL.Path + "?" + request.URL.RawQuery + " " + request.Proto + " " +
+			"\n"
+		r.WriteString(res)
+		r.WriteString(dumpRequestHeader(request))
+		r.WriteString("\n")
+
+		// dump body
+		buf, _ := ioutil.ReadAll(request.Body)
+		request.Body = ioutil.NopCloser(bytes.NewBuffer(buf)) // important!!
+		r.WriteString(string(buf))
+		return r.String()
+	}
+*/
 
 // tlsCert:
 //
 //	0 No certificate
 //	1 With self-signed certificate
-//	2 With custom certificate from CA(todo)
+//	2 With custom certificate from CA
 func createHttpbinServer(tlsCert int) (ts *httptest.Server) {
 	ts = createTestServer(func(w http.ResponseWriter, r *http.Request) {
 		httpbinHandler(w, r)
@@ -27,6 +85,51 @@ func createHttpbinServer(tlsCert int) (ts *httptest.Server) {
 }
 
 func httpbinHandler(w http.ResponseWriter, r *http.Request) {
+	const pathPattern = "^/(get|post|put|patch|delete)$"
+	isMethodPath, _ := regexp.MatchString(pathPattern, r.URL.Path)
+	switch path := r.URL.Path; {
+	case isMethodPath:
+		httpbinMethodsHandler(w, r)
+	case strings.HasPrefix(path, "/sleep/"): //sleep/3 (3ms)
+		sleepHandler(w, r)
+	case strings.HasPrefix(path, "/cookies"):
+		cookieHandler(w, r)
+	default:
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte("404 " + path))
+	}
+}
+
+// same as httpbin.org/cookies
+func cookieHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	cookies := map[string]string{}
+	for _, c := range r.Cookies() {
+		cookies[c.Name] = c.Value
+	}
+	switch r.URL.Path {
+	case "/cookies":
+		b, _ := json.Marshal(cookies)
+		w.Write(b)
+	case "/cookies/count":
+		count := "1"
+		cookie, err := r.Cookie("count")
+		if err == nil {
+			i, _ := strconv.Atoi(cookie.Value)
+			count = strconv.Itoa(i + 1)
+		}
+		http.SetCookie(w, &http.Cookie{Name: "count", Value: url.QueryEscape(count)})
+		b, _ := json.Marshal(cookies)
+		w.Write(b)
+	default:
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte("404 " + r.URL.Path))
+
+	}
+
+}
+
+func httpbinMethodsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	body, _ := ioutil.ReadAll(r.Body)
 	r.Body = ioutil.NopCloser(bytes.NewBuffer(body)) // important!!
@@ -68,6 +171,8 @@ func httpbinHandler(w http.ResponseWriter, r *http.Request) {
 		m["form"] = form
 		m["files"] = files
 	}
+
+	// 6. write response
 	buf, _ := json.Marshal(m)
 	_, _ = w.Write(buf)
 }
@@ -147,16 +252,40 @@ func parseQueryString(query string) map[string]string {
   - tlsCert:
     0 no certificate
     1 with self-signed certificate
-    2 with custom certificate from CA(todo)
+    2 with custom certificate from CA
 */
 func createTestServer(fn func(w http.ResponseWriter, r *http.Request), tlsCert int) (ts *httptest.Server) {
 	if tlsCert == 0 {
 		// 1. http test server
 		ts = httptest.NewServer(http.HandlerFunc(fn))
-	} else if tlsCert == 1 {
+	} else if tlsCert == 1 || tlsCert == 2 {
 		// 2. https test server: https://stackoverflow.com/questions/54899550/create-https-test-server-for-any-client
 		ts = httptest.NewUnstartedServer(http.HandlerFunc(fn))
+
+		// 3. use own cert
+		if tlsCert == 2 {
+			cert, err := tls.LoadX509KeyPair("../conf/nginx.crt", "../conf/nginx.key")
+			if err != nil {
+				panic(err)
+			}
+			_ = cert
+			ts.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+		}
 		ts.StartTLS()
 	}
 	return ts
+}
+
+func sleepHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	regx := regexp.MustCompile(`^/sleep/(\d+)`)
+	res := regx.FindStringSubmatch(r.URL.Path) // res may be: []string(nil)
+	miliseconds := 0
+	if res != nil {
+		miliseconds, _ = strconv.Atoi(res[1])
+	}
+	time.Sleep(time.Duration(miliseconds) * time.Millisecond)
+	out := fmt.Sprintf("sleep %d ms", miliseconds)
+	w.WriteHeader(200)
+	_, _ = w.Write([]byte(out))
 }
